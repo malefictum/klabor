@@ -1,0 +1,42 @@
+{
+  "id": "./",
+  "name": "Клабор (Деберц)",
+  "short_name": "Клабор",
+  "description": "Одесский клабор (деберц) — карточная игра на троих, вдвоём и напару: боты трёх уровней, игра по сети с друзьями, 256 портретов и секретные достижения.",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": [
+    "fullscreen",
+    "standalone"
+  ],
+  "orientation": "any",
+  "background_color": "#0c5561",
+  "theme_color": "#0c5561",
+  "categories": [
+    "games",
+    "entertainment"
+  ],
+  "icons": [
+    {
+      "src": "img/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
