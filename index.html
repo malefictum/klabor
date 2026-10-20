@@ -4590,25 +4590,48 @@ var Engine = (function () {
          пополам за столом никто не станет. */
       var foes = [];
       for (i = 0; i < sraw.length; i++) if (i !== declSide) foes.push(i);
-      var pot = Math.max(0, sraw[declSide]) + (carry ? (carry[declSide] || 0) : 0);
+      var pot;
+
+      if (carry) {
+        /* ---------- висяк проигран: пишется ТОЛЬКО кон ----------
+
+           Ник: «висяк — тут или распределяется условно 81–81 при победе
+           по висяковой, или 0–162 при провале висяковой, в базе (без
+           прочего), а не +344, такого быть не может».
+
+           Ровно так и устроена соседняя ветка — отыгранного висяка: там
+           пишется только котёл, а очки раздачи не пишутся вовсе, потому
+           что раздача играется НА СТАВКУ, а не в придачу к ней. А здесь
+           мы про это забыли: к котлу приплюсовывали ещё и очки самой
+           раздачи, и из висевших 162 получалось 344 — больше, чем вообще
+           стояло на кону. Ставка не может вырасти оттого, что её
+           проиграли.
+
+           Теперь симметрично: весь кон уходит вистующим, очки раздачи не
+           пишутся никому. Раздача решила судьбу ставки — и только. */
+        for (i = 0; i < final.length; i++) final[i] = 0;
+        pot = 0;
+        for (i = 0; i < carry.length; i++) pot += (carry[i] || 0);
+        res.potOnly = true; res.potTo = foes.slice();
+      } else {
+        pot = Math.max(0, sraw[declSide]);
+      }
+
       var share = Math.floor(pot / foes.length), rest = pot - share * foes.length;
       foes.forEach(function (k) { final[k] += share; });
       if (rest) final[bestOpp] += rest;
       final[declSide] = 0;
-      res.beitTo = foes.slice();               // между кем разделили очки играющего
+      res.beitTo = foes.slice();               // между кем разделили куш
       res.beitShare = share; res.beitRest = rest; res.beitBest = bestOpp;
-      // своё висевшее забирает каждый вистующий, доля играющего уже в котле
-      if (carry) {
-        foes.forEach(function (k) { final[k] += (carry[k] || 0); });
-        res.potTo = foes.slice();
-      }
       // бейт пишется на сторону: напару очки общие, значит и бейт общий
       sides[declSide].forEach(function (p) { this.beits[p]++; }, this);
       res.beitNo = this.sideBeits(declSide);
       this.say('БЕЙТ! ' + this.W3(this.declarer, 'набрал', 'набрала', 'набрали') + ' ' + sraw[declSide] + ' против ' + bestVal +
-        '. Очки уходят: ' + foes.map(function (k) { return this.sideName(k); }, this).join(' и ') +
+        '. ' + (carry ? 'Весь кон ' + pot + ' уходит' : 'Очки уходят') + ': ' +
+        foes.map(function (k) { return this.sideName(k); }, this).join(' и ') +
         (foes.length > 1 ? ' — пополам, по ' + share + (rest ? ' (лишнее ' + rest +
-          ' — ' + this.sideName(bestOpp) + ')' : '') : '') + '.', 'bad');
+          ' — ' + this.sideName(bestOpp) + ')' : '') : '') + '.' +
+        (carry ? ' Очки самой раздачи не пишутся: она играла кон.' : ''), 'bad');
       if (res.beitNo >= 3) {
         final[declSide] -= K.SHTRAF;
         res.shtraf = true;
@@ -6818,9 +6841,30 @@ var Net = (function () {
   function swapSeats(i, j) {
     if (!S.host || S.ready) return false;
     if (i === j || i < 0 || j < 0 || i >= S.conns.length || j >= S.conns.length) return false;
-    var a = S.conns[i], b = S.conns[j];
-    var keep = ['name', 'key', 'conn', 'sent', 'bot', 'face', 'stats'];
-    keep.forEach(function (k) { var t = a[k]; a[k] = b[k]; b[k] = t; });
+    var a = S.conns[i], b = S.conns[j], k, t;
+
+    /* ---------- пересадка переносит ЧЕЛОВЕКА, а не часть его ----------
+
+       Ник: «при возврате сажает не на своё место — если хозяин тебя
+       ПЕРЕСАДИЛ».
+
+       Тут стоял список полей, которые едут с игроком: имя, ключ,
+       соединение, портрет, профиль. Список надо было помнить и
+       дополнять, и когда место стало опознаваться по номеру игрока
+       (БОТЫ-ЗАМЕРЫ §54), номер в этот список дописать забыли. Снаружи
+       это выглядело так: хозяин пересадил человека, тот вылетел и
+       вернулся — а номер остался на СТАРОМ месте, по нему хозяин и
+       сажал. Вернувшийся попадал на чужое место и вышибал оттуда
+       соседа: «вы вошли за этот стол из другого окна».
+
+       Поэтому не список, а наоборот: меняем местами ВСЁ, кроме номера
+       самого места. Что бы к записи ни добавили завтра — оно поедет с
+       человеком само, и эти грабли больше не разложить. */
+    var keys = {};
+    for (k in a) keys[k] = 1;
+    for (k in b) keys[k] = 1;
+    delete keys.seat;
+    for (k in keys) { t = a[k]; a[k] = b[k]; b[k] = t; }
     a.seat = i; b.seat = j;
     // живым игрокам сообщаем их новое место, иначе они будут ждать чужих карт
     if (a.conn) send(a.conn, { t: 'seat', seat: i, key: a.key });
@@ -8789,7 +8833,7 @@ var UI = (function () {
           r.carry.map(function (x, k) { return nm(k) + ' ' + x; }).join(', ')) +
         ' — всего ' + pot + '. ' +
         (r.hang ? 'Снова поровну — котёл висит дальше.'
-          : r.beit ? 'Играющие проиграли раздачу, и их висевшее ушло вистующим вместе с очками раздачи.'
+          : r.beit ? 'Играющие проиграли раздачу — весь кон ушёл вистующим, а очки этой раздачи не пишутся.'
             : 'Играющие отыграли — котёл возвращается поровну, а очки этой раздачи не пишутся.'));
     }
     if (r.hang)
@@ -8799,15 +8843,21 @@ var UI = (function () {
       /* Вистующие делят пробейтившегося поровну — значит и в объяснении
          должно быть видно, кому сколько, а не «ушло туда-то». */
       var to = Array.isArray(r.beitTo) ? r.beitTo : [r.beitTo != null ? r.beitTo : 0];
-      var potAll = Math.max(0, r.sraw[r.declSide]) + (r.carry ? (r.carry[r.declSide] || 0) : 0);
-      L.push('<b>Бейт:</b> у играющих меньше — их ' + Math.max(0, r.sraw[r.declSide]) +
-        (r.carry ? ' и висевшие ' + (r.carry[r.declSide] || 0) : '') +
+      /* На висяковой раздаче уходит КОН, а не очки раздачи: она играла
+         ставку. Складывать одно с другим нельзя — получалось больше,
+         чем вообще стояло на кону. */
+      var potAll = 0;
+      if (r.carry) r.carry.forEach(function (x) { potAll += (x || 0); });
+      else potAll = Math.max(0, r.sraw[r.declSide]);
+      L.push('<b>Бейт:</b> у играющих меньше — ' +
+        (r.carry ? 'весь кон ' + potAll : 'их ' + potAll) +
         (to.length > 1
-          ? (r.carry ? ', всего ' + potAll : '') + ' — пополам вистующим: ' +
+          ? ' — пополам вистующим: ' +
             to.map(function (k) {
               return nm(k) + ' ' + ((r.beitShare || 0) + (k === r.beitBest ? (r.beitRest || 0) : 0));
             }).join(', ')
-          : ' → ' + nm(to[0])) + '.');
+          : ' → ' + nm(to[0])) + '.' +
+        (r.carry ? ' Очки раздачи не пишутся.' : ''));
       if (r.shtraf || r.final[r.declSide] < 0)
         L.push('<b>Бейт номер ' + (r.beitNo || 3) + '</b>' +
           (g.o.pairs && g.o.match2 ? ' в этом раунде' : ' в партии') + ' — ещё минус 100 играющим.');
@@ -10140,17 +10190,28 @@ var Boot = (function () {
   var CFG = {
     players: 3, target: 501, level: 2, match2: true, skin: 'teal', speed: 1,
     face: 0, talk: true, snd: true, myChar: 'auto',
-    autoBella: true, strogach: false, bellaAny: false, redeal4sevens: true, redealLow: 0,
-    klabor: false, obyaz: true, swap7: false, odessa: true, terz: 20, polt: 50
+    autoBella: false, strogach: false, bellaAny: false, redeal4sevens: true, redealLow: 0,
+    klabor: false, obyaz: true, swap7: false, odessa: true, terz: 20, polt: 50,
+    cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '20.10 18:23';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '20.10 19:41';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
       var s = JSON.parse(localStorage.klaborCfg || '{}');
       for (var k in CFG) if (k in s) CFG[k] = s[k];
     } catch (e) { }
+    /* ---------- белла больше не объявляется сама ----------
+
+       Ник: «отключи по умолчанию, белла включается сама — бесит сильно».
+
+       Сменить значение по умолчанию мало: у каждого, кто уже играл, в
+       хранилище лежит прежнее, и обновление ничего бы не изменило —
+       белла продолжала бы выскакивать. Поэтому разовая правка по номеру
+       настроек. Дальше выбор человека живёт как обычно: включил обратно —
+       так и останется, второй раз мы его не трогаем. */
+    if ((CFG.cfgV || 0) < 1) { CFG.autoBella = false; CFG.cfgV = 1; save(); }
   }
   function save() { try { localStorage.klaborCfg = JSON.stringify(CFG); } catch (e) { } }
 
