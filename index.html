@@ -777,7 +777,12 @@ h4.hd:first-child{margin-top:0}
 #mtabs button.on{opacity:1;color:var(--gold)}
 
 @media (max-width:900px){
-  #side{position:absolute;inset:0;width:auto;flex:none;z-index:40;display:none}
+  /* Панель ложится поверх стола, но только в пределах #body: без этого
+     она закрывала весь экран вместе с нижними вкладками, и вернуться
+     к «Столу» было нечем (Ник, 20.10). И фон глухой — стол сквозь неё
+     не просвечивает. */
+  #body{position:relative}
+  #side{position:absolute;inset:0;width:auto;flex:none;z-index:40;display:none;background:#0c2024}
   #side.on{display:flex}
   #mtabs{display:flex}
   #top .chip.hideS{display:none}
@@ -10139,7 +10144,7 @@ var Boot = (function () {
     klabor: false, obyaz: true, swap7: false, odessa: true, terz: 20, polt: 50
   };
   var game = null, brains = [];
-  var BUILD = '20.10 18:01';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '20.10 18:23';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
