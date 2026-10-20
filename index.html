@@ -10106,7 +10106,16 @@ var Cloud = (function () {
   if (ls(ON)) setTimeout(function () { load().catch(function (e) { C.err = msg(e); emit(); }); }, 400);
 
   C.on = function (f) { listeners.push(f); };
-  C.google = function () { return run(function () { return auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); }); };
+  /* select_account: Google каждый раз спрашивает, каким аккаунтом войти, —
+     иначе сменить почту (выйти и войти другой) было бы нельзя: он молча
+     пускал бы под прежней. */
+  C.google = function () {
+    return run(function () {
+      var pr = new firebase.auth.GoogleAuthProvider();
+      try { pr.setCustomParameters({ prompt: 'select_account' }); } catch (e) { }
+      return auth.signInWithPopup(pr);
+    });
+  };
   C.signIn = function (e, p) { return run(function () { return auth.signInWithEmailAndPassword(e, p); }); };
   C.signUp = function (e, p) { return run(function () { return auth.createUserWithEmailAndPassword(e, p); }); };
   C.reset = function (e) { return run(function () { return auth.sendPasswordResetEmail(e); }); };
@@ -10130,7 +10139,7 @@ var Boot = (function () {
     klabor: false, obyaz: true, swap7: false, odessa: true, terz: 20, polt: 50
   };
   var game = null, brains = [];
-  var BUILD = '20.10 17:45';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '20.10 18:01';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
