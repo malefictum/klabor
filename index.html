@@ -6797,6 +6797,11 @@ var Net = (function () {
       lobbyPush();
       return;
     }
+    if (m.t === 'done') {                            // гость попрощался со счётом
+      var ds = seatOfConn(conn);
+      if (ds > 0) markDone(ds);
+      return;
+    }
     if (m.t === 'chat') {
       var cs = seatOfConn(conn);
       if (cs < 0) return;
@@ -7068,6 +7073,62 @@ var Net = (function () {
   }
   function stopLoop() { loopStop = true; clearTimeout(backT); looping = null; }
 
+  /* ---------- конец партии: в лобби выходят все ----------
+
+     Ник: «нужно просто после сетевой партии выкидывать всех в лобби, и
+     всё — после того как каждый нажал ок после счёта».
+
+     Раньше стол закрывал ПЕРВЫЙ нажавший: хозяин жал «выйти в лобби», и
+     остальных выдёргивало из-за стола прямо со счётом на экране. Теперь
+     наоборот — закрывает ПОСЛЕДНИЙ: пока кто-то ещё смотрит итог, связь
+     ему нужна. Каждый нажал — стол закрылся, и все оказались в лобби.
+
+     Чтобы один задумавшийся не держал стол вечно, у хозяина стоит срок:
+     не дождались — закрываем сами. */
+  var DONE_WAIT = 45000;
+  var doneT = null;
+
+  /* Кого ещё ждём. Считаем только живых: вылетевший своё «ок» не нажмёт,
+     и ждать его смысла нет. */
+  function doneList() {
+    var out = [], i, c;
+    for (i = 0; i < S.conns.length; i++) {
+      c = S.conns[i];
+      if (!c) continue;
+      if (i === 0 || c.conn) out.push({ seat: i, name: c.name || ('Место ' + (i + 1)), done: !!c.done });
+    }
+    return out;
+  }
+  function allDone() {
+    var l = doneList(), i;
+    for (i = 0; i < l.length; i++) if (!l[i].done) return false;
+    return true;
+  }
+  function closeNow() {
+    clearTimeout(doneT); doneT = null;
+    try { closeTable('Партия окончена — стол закрыт.'); } catch (e) { }
+    /* окно со счётом у хозяина ещё открыто («Ждём остальных…») — убираем,
+       иначе оно остаётся под меню и потом ложится на новый стол */
+    try { if (UI && UI.closeModal) UI.closeModal(); } catch (e) { }
+    try { if (window.Boot && Boot.mainMenu) Boot.mainMenu(); } catch (e) { }
+  }
+  /* Хозяин отметил, что место со счётом попрощалось. */
+  function markDone(seat) {
+    if (!S.host) return;
+    if (S.conns[seat]) S.conns[seat].done = true;
+    if (UI && UI.netDone) UI.netDone(doneList());
+    if (allDone()) closeNow();
+  }
+  /* Нажали «в лобби» здесь. Возвращаем true, если ждать больше некого. */
+  function doneHere() {
+    if (!S.on) return true;
+    if (!S.host) { send(S.conns[0], { t: 'done' }); return true; }
+    clearTimeout(doneT);
+    doneT = setTimeout(closeNow, DONE_WAIT);     // один задумался — стол не вечный
+    markDone(0);
+    return allDone();
+  }
+
   /* ---------- закрыть стол ----------
 
      Ник: «когда заканчивается игра с сетевыми игроками, кнопка „ещё
@@ -7148,7 +7209,7 @@ var Net = (function () {
     setBroker: setBroker, testBroker: testBroker,
     myUid: myUid, setUid: setUid, newUid: newUid,
     saveHost: saveHost, savedHost: savedHost, dropSaved: dropSaved, updateMe: updateMe,
-    closeTable: closeTable,
+    closeTable: closeTable, doneHere: doneHere, doneList: doneList,
     savedBack: savedBack, dropBack: dropBack,
     chat: chat,
     loadPeer: loadPeer, PREFIX: PREFIX, send: send,
@@ -9415,8 +9476,8 @@ var UI = (function () {
        закрывается для всех, новую партию поднимают заново с лобби. */
     var isNet = !!(g.isNet || (typeof Net !== 'undefined' && Net.S && Net.S.on));
     var buttons = isNet
-      ? '<div class="row"><button class="btn pri wide" data-r="3">Выйти в лобби</button></div>' +
-        '<div class="hint">Стол закроется у всех. Новую партию поднимите из лобби.</div>'
+      ? '<div class="row"><button class="btn pri wide" data-r="3">В лобби</button></div>' +
+        '<div class="hint" id="overWait">Стол закроется, когда каждый посмотрит счёт и нажмёт «В лобби».</div>'
       : '<div class="row"><button class="btn pri wide" data-r="1">Ещё партию</button>' +
         '<button class="btn wide" data-r="2">В меню</button></div>';
     modal('<h3>' + (mine ? 'Вы выиграли партию!' : 'Партию выиграл ' + win) + '</h3>' +
@@ -9425,17 +9486,49 @@ var UI = (function () {
       function (m) {
         m.onclick = function (ev) {
           var b = ev.target.closest('[data-r]'); if (!b) return;
+          /* Сетевой выход разбираем ДО закрытия окна: хозяину окно ещё
+             нужно — он остаётся смотреть счёт, пока прощаются остальные. */
+          if (b.dataset.r === '3') return overLobby(b);
           closeModal();
-          if (b.dataset.r === '3') {
-            try { Net.closeTable('Партия окончена — стол закрыт.'); } catch (e) { }
-            return Boot.mainMenu();
-          }
           if (b.dataset.r === '2') return Boot.dlgMenu();
           Boot.start();
         };
       }, { light: true });
   }
 
+
+  /* ---------- «В лобби» после сетевой партии ----------
+
+     Ник: «выкидывать всех в лобби после того, как каждый нажал ок после
+     счёта». Гостю ждать нечего — он прощается и уходит. Хозяин уходит
+     последним: пока кто-то ещё смотрит счёт, стол ему нужен живым,
+     иначе человека выдернет прямо с цифрами на экране. */
+  function overLobby(btn) {
+    var host = !!(window.Net && Net.S && Net.S.host);
+    var all = true;
+    try { all = Net.doneHere(); } catch (e) { all = true; }
+    if (!host) {
+      /* Прощание уходит по проводу, и рвать связь в ту же миллисекунду
+         нельзя — сообщение не успеет (те же грабли, что были у зала). */
+      setTimeout(function () { try { Net.leave(); } catch (e) { } }, 300);
+      closeModal();
+      return Boot.mainMenu();
+    }
+    if (all) { closeModal(); return; }        // ждать некого — стол уже закрыт
+    if (btn) { btn.disabled = true; btn.textContent = 'Ждём остальных…'; }
+    netDone(Net.doneList ? Net.doneList() : []);
+  }
+
+  /* Кого ещё ждём — строкой под кнопкой, чтобы хозяин не гадал. */
+  function netDone(list) {
+    var el = document.getElementById('overWait');
+    if (!el) return;
+    var wait = (list || []).filter(function (x) { return !x.done; })
+      .map(function (x) { return x.name; });
+    el.textContent = wait.length
+      ? 'Ждём: ' + wait.join(', ') + '. Как только все посмотрят счёт, стол закроется.'
+      : 'Все посмотрели счёт — закрываем стол.';
+  }
 
   /* ---------- копирование в буфер ---------- */
   function copyText(t) {
@@ -9938,7 +10031,7 @@ var UI = (function () {
        беда и задаёт, а по экрану его не прочитать. */
     netFreeSeat: netFreeSeat, seatBot: function (i) { return !!(brains && brains[i]); },
     netLost: netLost, isBusy: isBusy, showPane: showPane, setPaused: setPaused, me: me,
-    netAway: netAway, netHold: function () { return netHold; },
+    netAway: netAway, netHold: function () { return netHold; }, netDone: netDone,
     copyText: copyText, copyHTML: copyHTML, achGold: achGold,
     chatIn: chatIn, chatTabs: chatTabs, chatDraw: chatDraw,
     lobbyRefresh: function (l) { if (Boot.lobbyRefresh) Boot.lobbyRefresh(l); }
@@ -10195,7 +10288,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '20.10 19:41';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '21.10 05:45';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
