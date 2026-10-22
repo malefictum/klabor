@@ -6495,7 +6495,8 @@ var Net = (function () {
     try {
       localStorage.setItem('klabor-host', JSON.stringify({
         ts: Date.now(), code: S.code, cfg: S.cfg,
-        conns: S.conns.map(function (c) { return { seat: c.seat, name: c.name, key: c.key, face: c.face }; }),
+        conns: S.conns.map(function (c) { return { seat: c.seat, name: c.name, key: c.key, face: c.face,
+          bot: !!c.bot && !c.away, uid: c.uid || null }; }),
         chars: g.chars || null, faces: g.faces || null,
         game: Engine.snapshot(g)
       }));
@@ -6503,7 +6504,9 @@ var Net = (function () {
   }
   /* Запись живёт полсуток: код стола после этого всё равно мёртвый —
      хозяин давно закрыл вкладку, и кнопка вела бы в никуда. */
-  var BACK_TTL = 12 * 3600 * 1000;
+  /* [stated] Ник 22.10.2026: партию можно отложить и доиграть потом —
+     поэтому и «Вернуться за стол», и сохранённый стол живут месяц. */
+  var BACK_TTL = 30 * 24 * 3600 * 1000;
   function savedBack() {
     try {
       var d = JSON.parse(LS('klabor-back') || 'null');
@@ -6518,7 +6521,7 @@ var Net = (function () {
     try {
       var d = JSON.parse(localStorage.getItem('klabor-host') || 'null');
       if (!d || !d.code || !d.game) return null;
-      if (Date.now() - d.ts > 36 * 3600 * 1000) return null;   // старше полутора суток — не предлагаем
+      if (Date.now() - d.ts > BACK_TTL) return null;          // старше месяца — не предлагаем
       return d;
     } catch (e) { return null; }
   }
@@ -6555,7 +6558,9 @@ var Net = (function () {
           S.conns[i].key = fixed.conns[i].key || S.conns[i].key;
           S.conns[i].name = fixed.conns[i].name || S.conns[i].name;
           if (fixed.conns[i].face != null) S.conns[i].face = fixed.conns[i].face;
-          S.conns[i].bot = i !== 0;
+          /* старые записи без отметки — как раньше, боты; новые помнят людей */
+          S.conns[i].bot = i !== 0 && (fixed.conns[i].bot === undefined || !!fixed.conns[i].bot);
+          if (i !== 0 && fixed.conns[i].uid) S.conns[i].uid = fixed.conns[i].uid;
         }
       LS('klabor-room', S.code);
       /* Поднять стол с первого раза выходит не всегда: публичный брокер
@@ -7193,6 +7198,41 @@ var Net = (function () {
     leave();
   }
 
+  /* ---------- отложить партию ----------
+     [stated] Ник 22.10.2026: «игра сохраняется — недоигранная партия
+     записывается хозяину стола; её можно закрыть и потом продолжить».
+     Запись уже лежит (saveHost на каждом ходе). Здесь хозяин закрывает
+     стол, НЕ стирая её, и прощается с гостями — иначе они бесконечно
+     стучались бы обратно. У гостей остаётся «Вернуться за стол»: когда
+     хозяин поднимет стол, они сядут на свои места по ключу и номеру. */
+  function postpone() {
+    if (!S.on) return;
+    if (S.host) {
+      if (S.game) saveHost(S.game);
+      for (var i = 1; i < S.conns.length; i++) {
+        var c = S.conns[i];
+        if (c && c.conn) send(c.conn, { t: 'bye', later: true,
+          why: 'Хозяин отложил партию. Доиграете потом: «Вернуться за стол» в главном меню, когда он снова поднимет стол.' });
+      }
+      setTimeout(leave, 400);                 // прощание уходит по проводу — рвём связь не сразу
+      return;
+    }
+    leave();
+  }
+  /* Поднятый стол: места людей не отдаём ботам, а ждём их — как при
+     обрыве. Вернулся — сел на своё место; не вернулся — хозяин решает
+     сам (кнопка «Посадить бота» в плашке). */
+  function holdHumans() {
+    if (!S.host) return 0;
+    var k = 0;
+    for (var i = 1; i < S.conns.length; i++) {
+      var c = S.conns[i];
+      if (c && !c.bot && !c.conn) { c.away = Date.now(); k++; }
+    }
+    if (k) { lobbyPush(); awayPush(); }
+    return k;
+  }
+
   function leave() {
     stopLoop();
     try { if (S.peer) S.peer.destroy(); } catch (e) { }
@@ -7244,7 +7284,7 @@ var Net = (function () {
     setBroker: setBroker, testBroker: testBroker,
     myUid: myUid, setUid: setUid, newUid: newUid,
     saveHost: saveHost, savedHost: savedHost, dropSaved: dropSaved, updateMe: updateMe,
-    closeTable: closeTable, doneHere: doneHere, doneList: doneList,
+    closeTable: closeTable, postpone: postpone, holdHumans: holdHumans, doneHere: doneHere, doneList: doneList,
     savedBack: savedBack, dropBack: dropBack,
     chat: chat,
     loadPeer: loadPeer, PREFIX: PREFIX, send: send,
@@ -10333,7 +10373,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '22.10 12:30';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '22.10 13:33';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
@@ -12162,8 +12202,8 @@ var Boot = (function () {
       '<button class="btn" data-m="profile">Профиль</button>' +
       '<button class="btn" data-m="rules">Правила</button>' +
       '</div>' +
-      (host ? '<div class="row"><button class="btn wide" data-m="rehost">Поднять прежний стол ' +
-        host.code + '</button></div>' : '') +
+      (host ? '<div class="row"><button class="btn wide" data-m="rehost">Продолжить отложенную партию — стол ' +
+        host.code + (host.game && host.game.handNo ? ', раздача ' + host.game.handNo : '') + '</button></div>' : '') +
       (back && !host ? '<div class="row"><button class="btn wide" data-m="back">Вернуться за стол ' +
         esc(back.code) + ' — место ' + (back.seat + 1) + '</button></div>' : '') +
       '<div class="foot"><span class="sub build">сборка ' + BUILD + '</span>' +
@@ -12436,7 +12476,10 @@ var Boot = (function () {
       '<button class="btn" data-m="profile">Профиль</button>' +
       '<button class="btn" data-m="rules">Правила</button>' +
       '<button class="btn" data-m="cfg">Правила этой партии</button>' +
-      '<button class="btn" data-m="quit">Выйти в главное меню</button>' +
+      (net && Net.S.host
+        ? '<button class="btn" data-m="later">Отложить партию — доиграем потом</button>' +
+          '<button class="btn" data-m="end">Закончить партию и закрыть стол</button>'
+        : '<button class="btn" data-m="quit">Выйти в главное меню</button>') +
       '</div>' +
       (net ? '<div class="sub" style="margin-top:12px">Стол <b>' + Net.S.code + '</b>' + UI.copyHTML(Net.S.code, 'inline') +
         (Net.S.host ? ' — вы хозяин.' : ', ваш ключ места <b>' + Net.S.key + '</b>' + UI.copyHTML(Net.S.key, 'inline')) + '</div>' : '') +
@@ -12453,6 +12496,15 @@ var Boot = (function () {
         if (v === 'profile') return go(scrProfile);
         if (v === 'cfg') return dlgSettings('game', scrPause);
         if (v === 'rules') return dlgRules();
+        if (v === 'later') {
+          Net.postpone(); netBtn();
+          UI.toast('Партия отложена. Продолжить — в главном меню');
+          return mainMenu();
+        }
+        if (v === 'end') {
+          try { Net.closeTable('Хозяин закончил партию — стол закрыт.'); } catch (e) { }
+          netBtn(); return mainMenu();
+        }
         if (v === 'quit') {
           if (Net.S.on) { Net.leave(); netBtn(); }
           mainMenu();                          // стола для нас больше нет — вернёмся в комнату
@@ -12499,12 +12551,15 @@ var Boot = (function () {
         game.chars = d.chars || game.chars || [];
         game.faces = d.faces || game.faces || [];
         brains = [];
-        for (var i = 0; i < game.N; i++)
-          brains.push(i === 0 ? null : new Bots.Brain(game, i, CFG.level));
+        for (var i = 0; i < game.N; i++) {
+          var wasBot = i !== 0 && (!d.conns[i] || d.conns[i].bot === undefined || d.conns[i].bot);
+          brains.push(wasBot ? new Bots.Brain(game, i, CFG.level) : null);
+        }
         Talk.reset();
         UI.setSpeed(CFG.speed);
         UI.attach(game, brains, 0);
         Net.startGame(game);
+        Net.holdHumans();                      // люди с прошлого раза — ждём их, ботов не сажаем
         closeAll(); netBtn(); talkBtn();
         UI.netEvents([]);
         UI.toast('Стол ' + d.code + ' поднят. Игроки входят по своим ключам');
