@@ -852,6 +852,9 @@ h4.hd:first-child{margin-top:0}
   background:rgba(12,26,30,.96);border:1px solid #e0a95a;border-radius:10px;
   padding:7px 14px;color:#f0dfc0;font-size:14px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
 #await .awh{font-weight:700;color:#e0a95a;margin-right:4px}
+/* Приписка для тех, кто не хозяин: у них кнопки нет, и без слов плашка
+   выглядит так, будто от них чего-то ждут. */
+#await .awh2{color:#9fb3b8;margin-left:2px}
 @media (max-width:900px){ #await .awin{font-size:12.5px;padding:6px 10px} }
 </style>
 </head>
@@ -1069,7 +1072,34 @@ var K = (function () {
     /* TRAKT: козырь обязателен даже если взятка уже перебита старше.
        Напарник наверху освобождает от него только при `freeTrakt` —
        по умолчанию нет. */
-    if (trumps.length && !(freeTrakt && mateOnTop())) return trumps;
+    if (trumps.length && !(freeTrakt && mateOnTop())) {
+      /* ---------- подрезали — перебивай, а не отделывайся мелким ----------
+
+         Ник: «заход в пику, пик ни у кого нет, второй бьёт восьмёркой,
+         третий перебивает десяткой, а четвёртый имел козырного валета и
+         мелкий козырь — скинул мелкий, а обязан был перебивать вальтом».
+
+         Правило у нас записано целиком: «нет масти — обязан козырем;
+         зашли козырем — обязан перебить старшим, если он есть». Вторая
+         половина стояла ТОЛЬКО в ветке захода козырем. Если заходили
+         простой мастью, а взятку уже подрезали, годился любой козырь —
+         и мелкий мимо валета в том числе.
+
+         Поблажка та же, что и при заходе козырем: напарника перебивать
+         не обязан. Сам тракт при этом остаётся безусловным — козырь
+         положить всё равно надо. */
+      var top2 = 0, hasTrump = false, j;
+      for (j = 0; j < plays.length; j++)
+        if (plays[j].c.s === trump) {
+          hasTrump = true;
+          if (ORD_TRUMP[plays[j].c.r] > top2) top2 = ORD_TRUMP[plays[j].c.r];
+        }
+      if (hasTrump && !mateOnTop()) {
+        var over = trumps.filter(function (x) { return ORD_TRUMP[x.r] > top2; });
+        if (over.length) return over;
+      }
+      return trumps;
+    }
     return hand.slice();
   }
 
@@ -6355,7 +6385,7 @@ var Net = (function () {
 
      Числа вынесены наружу: проверкам нужны секунды вместо минут, и
      трогать для этого сами правила нельзя. */
-  var T = { beat: 4000, dead: 15000, away: 45000 };
+  var T = { beat: 4000, dead: 15000 };
 
   /* Держать пира на связи: сорвалось — возвращаемся под тем же именем,
      с растущей паузой и без фанатизма. */
@@ -6590,7 +6620,6 @@ var Net = (function () {
      может не ждать — в той же плашке кнопка «посадить бота».
 
      В лобби ждать нечего: партия не началась, место просто пустеет. */
-  var AWAY_GRACE = function () { return T.away; };
 
   function markAway(i, onState) {
     var c = S.conns[i];
@@ -6602,7 +6631,9 @@ var Net = (function () {
       if (UI && UI.toast) UI.toast((c.name || 'Игрок') + ' ушёл из-за стола');
       return;
     }
-    c.away = Date.now() + AWAY_GRACE();
+    /* Помечаем МОМЕНТ обрыва, а не срок. Срока больше нет: бот сам на
+       место не садится (см. ниже). */
+    c.away = Date.now();
     c.bot = false;
     if (UI && UI.toast) UI.toast((c.name || 'Игрок') + ' без связи — ждём его, партия на паузе');
     lobbyPush(); onState && onState();
@@ -6624,7 +6655,9 @@ var Net = (function () {
       if (c && c.away)
         out.push({
           seat: i, name: c.name || ('Место ' + (i + 1)),
-          left: Math.max(0, c.away - now)
+          /* Сколько УЖЕ ждём. Раньше возили остаток до посадки бота, но
+             бот сам больше не садится, и обратный отсчёт врал бы. */
+          since: Math.max(0, now - c.away)
         });
     }
     return out;
@@ -6635,8 +6668,14 @@ var Net = (function () {
     toGuests({ t: 'away', list: list });
     if (UI && UI.netAway) UI.netAway(list);
   }
-  /* Ждать больше нечего: место забирает бот. Сюда приходят двумя
-     путями — вышло время или хозяин нажал кнопку. Бота сажаем ПОСЛЕ
+  /* Место забирает бот. Путь сюда ОДИН: это решил человек за столом —
+     хозяин нажал «посадить бота» в плашке ожидания.
+
+     [stated] Ник 22.10.2026: «бот садится, только если его посадит игрок,
+     а не автоматом». Раньше через 45 секунд бот садился сам, и человек,
+     который чинил вай-фай или менял сеть, возвращался к тому, что его
+     картами уже играют. Теперь стол ждёт столько, сколько нужно, а
+     решение «хватит ждать» принимает человек. Бота сажаем ПОСЛЕ
      того, как снята пауза: иначе его первый ход упрётся в неё же. */
   function seatBot(i) {
     if (!S.host) return false;
@@ -7179,10 +7218,6 @@ var Net = (function () {
           try { dead.close(); } catch (e) { }
           dropConn(dead);                            // молчит слишком долго — считаем, что ушёл
         }
-      }
-      for (i = 1; i < S.conns.length; i++) {
-        c = S.conns[i];
-        if (c && c.away && now >= c.away) seatBot(i);
       }
       return;
     }
@@ -9948,10 +9983,14 @@ var UI = (function () {
   }
   /* ---------- стол ждёт игрока ----------
 
-     Плашка поверх стола: кого ждём и сколько осталось. Секунды тикают
+     Плашка поверх стола: кого ждём и сколько уже ждём. Секунды тикают
      на месте — хозяин присылает список только когда он меняется, гонять
      отсчёт по сети незачем. Пустой список значит «все на месте»: тогда
-     плашка уходит и пауза снимается. */
+     плашка уходит и пауза снимается.
+
+     Отсчёт идёт ВПЕРЁД, а не назад: бот сам на место не сядет, сколько
+     бы времени ни прошло. Посадить его может только хозяин — кнопкой
+     здесь же. */
   var awayT = null, awayTill = {}, awayWho = [];
   function netAway(list) {
     awayWho = list || [];
@@ -9965,8 +10004,11 @@ var UI = (function () {
     }
     var now = Date.now(), i;
     awayTill = {};
+    /* Считаем время ВПЕРЁД, от момента обрыва: обратного отсчёта больше
+       нет, потому что по его истечении ничего не происходит — бота сажает
+       человек, а не часы. */
     for (i = 0; i < awayWho.length; i++)
-      awayTill[awayWho[i].seat] = now + Math.max(0, awayWho[i].left || 0);
+      awayTill[awayWho[i].seat] = now - Math.max(0, awayWho[i].since || 0);
     netHoldOn(true);
     var host = !!(typeof Net !== 'undefined' && Net.S && Net.S.host);
     function draw() {
@@ -9974,13 +10016,16 @@ var UI = (function () {
       var t = Date.now(), rows = [];
       for (var k = 0; k < awayWho.length; k++) {
         var st = awayWho[k].seat;
-        var left = Math.max(0, Math.ceil((awayTill[st] - t) / 1000));
-        rows.push('<b>' + esc(awayWho[k].name) + '</b> — ' + left + ' сек' +
+        var sec = Math.max(0, Math.floor((t - awayTill[st]) / 1000));
+        var mmss = sec < 60 ? (sec + ' сек')
+          : (Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2));
+        rows.push('<b>' + esc(awayWho[k].name) + '</b> — нет ' + mmss +
           (host ? ' <button class="btn tiny" data-awbot="' + st + '">Посадить бота</button>' : ''));
       }
       box.className = 'on';
       box.innerHTML = '<div class="awin"><span class="awh">Партия на паузе: ждём игрока</span>' +
-        rows.join(' · ') + '</div>';
+        rows.join(' · ') +
+        (host ? '' : '<span class="awh2">Стол ждёт, пока он вернётся.</span>') + '</div>';
     }
     draw();
     awayT = setInterval(draw, 500);
@@ -10288,7 +10333,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '21.10 05:45';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '22.10 12:30';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {

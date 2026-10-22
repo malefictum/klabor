@@ -1,6 +1,6 @@
 // Сервис-воркер клабора. Генерируется build.py из store/sw.template.js — правьте шаблон.
-// Сборка 21.10 05:45. Новая сборка = новое имя кэша, старый удаляется.
-var CACHE = 'klabor-21.10 05:45';
+// Сборка 22.10 12:30. Новая сборка = новое имя кэша, старый удаляется.
+var CACHE = 'klabor-22.10 12:30';
 var CORE = ["./", "index.html", "manifest.webmanifest", "img/JC.webp", "img/JD.webp", "img/JH.webp", "img/JS.webp", "img/KC.webp", "img/KD.webp", "img/KH.webp", "img/KS.webp", "img/QC.webp", "img/QD.webp", "img/QH.webp", "img/QS.webp", "img/back.webp", "img/icons/icon-150.png", "img/icons/icon-180.png", "img/icons/icon-192.png", "img/icons/icon-32.png", "img/icons/icon-44.png", "img/icons/icon-512.png", "img/icons/maskable-512.png", "img/icons/splash-620x300.png", "img/icons/wide-310x150.png"];
 
 self.addEventListener('install', function (e) {
