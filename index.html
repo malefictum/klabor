@@ -8302,7 +8302,7 @@ var UI = (function () {
       case 'bella': toast('Белла!'); return wait(650, next);
       case 'play-start': drawAll(); return next();
       case 'card':
-        if (holdTrick) return flushTrick(function () { step(e, next); });   // страховка
+        if (holdTrick) return flushTrick(function () { handleEvent(e, next); });   // страховка
         var from;
         if (e.p === ME) {
           var hc = $('#hand .card[data-id="' + K.id(e.c) + '"]');
@@ -8555,6 +8555,24 @@ var UI = (function () {
   function closeModal() {
     var m = $('#modal');
     m.classList.remove('on'); m.classList.remove('light'); m.innerHTML = '';
+    /* ---------- окно снимает свою паузу ----------
+
+       Своя пауза значит одно: поверх стола что-то открыто. Экран её
+       снимал сам, а окно — нет, ему это никогда не было нужно: игровые
+       окна паузу и не поднимали. Поднимал её экран паузы, и этого
+       хватало, чтобы стол встал насовсем:
+
+         идёт торг, открыто «Беру / Пас» → Escape (на itch.io им выходят
+         из полного экрана) → поверх легла «Пауза» → «Вернуться к партии»
+         → экран ушёл, а окно торга осталось, и `closeSplash` паузу не
+         снял — под ним окно. Человек отвечает в окне, ход принят,
+         события доигрывают, и `ready` упирается в паузу. На экране при
+         этом ничего: ни окна, ни экрана — просто стол, который ждёт
+         чьего-то хода и больше не идёт.
+
+       Правило теперь одно для обоих слоёв: кто закрыл последний —
+       тот и снял. */
+    if (!$('#splash').classList.contains('on')) { pausedUI = false; repause(); }
   }
 
   // стартовый экран живёт отдельно от игровых окон, чтобы они не наезжали друг на друга
@@ -9907,7 +9925,61 @@ var UI = (function () {
     if (matchMedia('(max-width:900px)').matches) $('#side').classList.add('on');
   }
 
+  /* ---------- страж стола ----------
+
+     Цепочка «событие → показ → следующий ход» вся собрана на обратных
+     вызовах: каждый шаг обязан позвать следующий. Потеряется один
+     вызов — и стол стоит навсегда: очередь занята, `ready` больше не
+     позовут, а на экране живая подсказка «Ход: такой-то». Именно это и
+     видели игроки.
+
+     Причину мы нашли и починили (выше, closeModal). Страж не лечит
+     причины — он не даёт столу умереть от следующей: раз в две секунды
+     смотрит, не стоит ли стол при живом ходе, и если стоит десять
+     секунд — отпускает очередь и спрашивает ход заново.
+
+     Чего страж НЕ трогает: открытое окно и экран (человек думает),
+     сетевую паузу (стол и должен ждать вылетевшего) и свой ход
+     человека, когда карты в руке можно положить. */
+  var guardT = null, guardStamp = '', guardSince = 0, guardAt = -1, guardN = 0;
+  function tableStamp() {
+    if (!g) return '';
+    return [g.handNo, g.ev ? g.ev.length : 0, evIdx, g.pending ? g.pending.type + g.pending.p : '-',
+      g.cur ? g.cur.length : 0, pumping, pausedUI, netHold].join('/');
+  }
+  function guardOK() { guardSince = Date.now(); }
+  function guard() {
+    if (!g || g.over || !g.pending) { guardSince = 0; return; }
+    var s = tableStamp();
+    if (s !== guardStamp || !guardSince) { guardStamp = s; return guardOK(); }
+    if (Date.now() - guardSince < 10000) return;
+    if ($('#modal').classList.contains('on') || $('#splash').classList.contains('on')) return guardOK();
+    if (netHold) return guardOK();
+    var p = g.pending;
+    if (p.p === ME && p.type === 'play' && $('#hand .card.playable')) return guardOK();
+    guardOK();
+    /* Поднимаем стол. Свою паузу без единого окна держать не за что,
+       занятую очередь без хода — тоже. */
+    pausedUI = false; pumping = false; busy = false; needReady = false; repause();
+    if (evIdx < g.ev.length) {
+      /* Если спотыкаемся на одном и том же событии второй раз — шаг
+         бросает исключение. Пропускаем его: партия дороже одной
+         анимации. */
+      if (guardAt === evIdx && ++guardN > 1) { evIdx++; guardN = 0; }
+      else if (guardAt !== evIdx) { guardAt = evIdx; guardN = 1; }
+      return pump();
+    }
+    if (p.type === 'next') {
+      /* Итог раздачи ждёт кнопки в окне, а окна нет — показываем снова. */
+      for (var i = g.ev.length - 1; i >= 0; i--)
+        if (g.ev[i].e === 'hand-end') return showResult(g.ev[i]);
+      return;
+    }
+    ready();
+  }
+
   function bindOnce() {
+    if (!guardT) guardT = setInterval(guard, 2000);
     document.addEventListener('click', onCopyClick, true);
     /* «Посадить бота» в плашке ожидания: хозяин решил не ждать. */
     document.addEventListener('click', function (ev) {
@@ -10373,7 +10445,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '22.10 13:33';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '27.10 15:14';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
