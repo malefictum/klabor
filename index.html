@@ -6761,6 +6761,31 @@ var Net = (function () {
       if (seat < 0 && m.key)
         for (i = 1; i < S.conns.length; i++)
           if (S.conns[i].key === m.key && !(S.conns[i].conn && S.conns[i].conn.open)) { seat = i; break; }
+      /* ---------- партия идёт — за стол садятся только свои ----------
+
+         Ник, 28.10, со скриншота комнаты: «если игра уже идёт, в неё
+         должны садиться только те user с ID, которые были на момент
+         старта. Тут двое играют — третий сесть к ним не должен. И не
+         дай бог заместить другого игрока».
+
+         Своих мы уже нашли выше: по номеру игрока (uid) или по ключу
+         места. Всё, что ниже, — раздача ПУСТЫХ мест новичкам, и за
+         идущим столом её быть не должно: пустых мест там не бывает
+         вовсе. Любое место без соединения — чьё-то: либо его держат за
+         вылетевшим, либо хозяин посадил туда бота, либо бот сидел там
+         с самого начала. Посадить на такое место прохожего — значит
+         отдать ему чужие карты.
+
+         До старта (в лобби) всё по-прежнему: кто пришёл, тот и сел. */
+      if (seat < 0 && S.ready) {
+        /* Канал не рвём: `bye` должен доехать и сказать человеку, что
+           случилось. Закрой соединение здесь — и гость увидит глухое
+           «стол не отвечает», как будто стол сломан (так и вышло на
+           первом прогоне проверки). */
+        send(conn, { t: 'bye', why: 'Партия уже идёт. За этот стол могут вернуться ' +
+          'только те, кто играл за ним с начала.' });
+        return;
+      }
       /* Пустые места раздаём новичкам — но место, которое СЕЙЧАС держат
          за вылетевшим, не трогаем ни в какую: иначе он вернётся, а за
          его картами уже сидит чужой человек. */
@@ -6936,8 +6961,13 @@ var Net = (function () {
       LS('klabor-room', S.code); LS('klabor-name', myName);
       return new Promise(function (res, rej) {
         var done = false, tries = 0;
-        function ok2(v) { done = true; res(v); }
-        S._resolve = ok2;
+        function ok2(v) { done = true; S._resolve = S._reject = null; res(v); }
+        /* Отказ хозяина — такой же ответ, как согласие, и ждать после
+           него нечего. Без этого стук в идущую партию заканчивался так:
+           человек видел «Партия уже идёт», а через четырнадцать секунд
+           вдогонку глухое «стол не отвечает» — будто стол ещё и сломан. */
+        function no2(e) { done = true; S._resolve = S._reject = null; rej(e); }
+        S._resolve = ok2; S._reject = no2;
         (function attempt() {
           tries++;
           var p = newPeer(null);
@@ -6960,7 +6990,7 @@ var Net = (function () {
               onGuestMsg(m, res);
             });
             conn.on('close', function () { onLost(); });
-            conn.on('error', function () { if (!done) { done = true; rej(new Error('стол не отвечает')); } });
+            conn.on('error', function () { if (!done) no2(new Error('стол не отвечает')); });
           });
           p.on('error', function (e) {
             if (done) return;
@@ -6969,13 +6999,12 @@ var Net = (function () {
               try { p.destroy(); } catch (e2) { }
               return setTimeout(attempt, 500 * tries);
             }
-            done = true;
             try { p.destroy(); } catch (e2) { }
             S.on = false; S.peer = null;
-            rej(new Error(netErr(e)));
+            no2(new Error(netErr(e)));
           });
         })();
-        setTimeout(function () { if (!done) { done = true; rej(new Error('стол не отвечает')); } }, 14000);
+        setTimeout(function () { if (!done) no2(new Error('стол не отвечает')); }, 14000);
       });
     });
   }
@@ -7018,7 +7047,12 @@ var Net = (function () {
       return;
     }
     if (m.t === 'bye') {
-      S.on = false; UI.toast(m.why || 'Стол закрыт');
+      S.on = false;
+      /* Ещё стучались — значит это ответ на стук: отдаём его тому, кто
+         ждёт обещание (кнопке «Подключиться» в комнате, например), и
+         второй раз не тостим. */
+      if (S._reject) { var no = S._reject; S._resolve = S._reject = null; no(new Error(m.why || 'Стол закрыт')); return; }
+      UI.toast(m.why || 'Стол закрыт');
       // высаженного гостя не оставляем перед мёртвым списком мест
       try { if (window.Boot && Boot.mainMenu) { UI.closeModal(); Boot.mainMenu(); } } catch (e) { }
       return;
@@ -7500,9 +7534,11 @@ var Hall = (function () {
     if (!who) return;
     if (m.t === 'msg') return broadcastMsg(who.name, String(m.text || '').slice(0, 200), who.id);
     if (m.t === 'table') {
-      who.table = m.code ? { code: String(m.code).slice(0, 6), N: m.N || 3 } : null;
-      if (who.table) tableLine(who.name, who.table.code, who.table.N, who.id);
-      else line('sys', who.name + ' закрыл стол.');
+      var had = who.table && who.table.code;
+      who.table = m.code ? { code: String(m.code).slice(0, 6), N: m.N || 3, go: !!m.go } : null;
+      // новость — только новый стол; «теперь там играют» объявлять незачем
+      if (who.table && who.table.code !== had) tableLine(who.name, who.table.code, who.table.N, who.id);
+      else if (!who.table && had) line('sys', who.name + ' закрыл стол.');
       pushList();
       return;
     }
@@ -7616,16 +7652,22 @@ var Hall = (function () {
   }
 
   // объявить, что я поднял стол (или закрыл его)
-  function table(code, N) {
+  /* `go` — за столом уже играют. Объявление стола этим и живёт дальше:
+     пока стол в лобби, в комнату зовут; как партия началась — зовут
+     зря, таких гость всё равно разворачивает (см. p7_net, `hello`), и
+     кнопка «Подключиться» только обманывает. Строку в разговор пишем
+     ТОЛЬКО когда стол новый: обновление пометки — не новость. */
+  function table(code, N, go) {
     if (!H.ready) return;
-    H.me.table = code ? { code: code, N: N } : null;
+    var was = H.me.table && H.me.table.code;
+    H.me.table = code ? { code: code, N: N, go: !!go } : null;
     if (H.host) {
       var m = H.members.filter(function (x) { return x.id === 'host'; })[0];
       if (m) m.table = H.me.table;
-      if (code) tableLine(H.me.name, code, N, H.me.id);
-      else line('sys', 'Вы закрыли стол.');
+      if (code && code !== was) tableLine(H.me.name, code, N, H.me.id);
+      else if (!code && was) line('sys', 'Вы закрыли стол.');
       pushList();
-    } else Net.send(H.hostConn, { t: 'table', code: code || null, N: N || 0 });
+    } else Net.send(H.hostConn, { t: 'table', code: code || null, N: N || 0, go: !!go });
   }
 
   /* ---------- где человек сейчас ----------
@@ -10445,7 +10487,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '27.10 15:14';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '28.10 15:43';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
@@ -10612,6 +10654,10 @@ var Boot = (function () {
     UI.netEvents([]);
     netBtn();
     Hall.where('table');       // из комнаты не уходим — помечаемся, что мы за столом
+    /* И отдельно — про сам стол: за ним теперь ИГРАЮТ. В комнате он
+       перестаёт быть приглашением: хозяин за идущим столом никого
+       нового не посадит, и звать туда — только дразнить. */
+    if (Net.S.on && Net.S.host && Net.S.code) Hall.table(Net.S.code, CFG.players, true);
   }
 
   /* ============================================================
@@ -12061,7 +12107,14 @@ var Boot = (function () {
         '<span class="hname"><b>' + esc(m.name) + '</b>' +
         '<span class="hsub">' + sub.join(' · ') + '</span></span>' +
         (busy && !mine
-          ? '<button class="btn tiny" data-hjoin="' + m.table.code + '">Подключиться</button>' : '') +
+          ? (m.table.go
+            /* За столом уже играют. Кнопки тут нет не для красоты:
+               хозяин такого стола посадит только своих — тех, кто
+               начинал, — а всем прочим ответит отказом. Пусть лучше
+               видно сразу, чем после стука. */
+            ? '<span class="hst">партия идёт</span>'
+            : '<button class="btn tiny" data-hjoin="' + m.table.code + '">Подключиться</button>')
+          : '') +
         '</div>';
     }).join('');
   }
@@ -12073,9 +12126,16 @@ var Boot = (function () {
       if (x.k === 'sys') return '<div class="hmsg sys">' + esc(x.t) + '</div>';
       if (x.k === 'table') {
         var mine = Hall.S.me.table && Hall.S.me.table.code === x.code;   // свой стол не зовём
+        /* Объявление висит в разговоре, а стол за это время мог уже
+           сесть играть. Смотрим не на старую строку, а на живой список
+           комнаты. */
+        var going = Hall.S.members.some(function (p) {
+          return p.table && p.table.code === x.code && p.table.go;
+        });
         return '<div class="hmsg tbl">' + esc(x.t) +
           (mine ? ' <span class="hst">это ваш стол</span>'
-            : ' <button class="btn tiny" data-hjoin="' + x.code + '">Подключиться</button>') + '</div>';
+            : going ? ' <span class="hst">партия идёт</span>'
+              : ' <button class="btn tiny" data-hjoin="' + x.code + '">Подключиться</button>') + '</div>';
       }
       return '<div class="hmsg"><b>' + esc(x.from) + '</b> ' + esc(x.t) + '</div>';
     }).join('');
@@ -12186,6 +12246,10 @@ var Boot = (function () {
      расставляя вызовы по экранам. */
   function hallWhere() {
     Hall.where(!atTable() ? 'room' : (Net.S && Net.S.on ? 'table' : 'bots'));
+    /* Стола больше нет, а объявление о нём в комнате осталось бы
+       висеть до перезагрузки — с живой кнопкой «Подключиться» в
+       никуда. Снимаем его здесь же, одним местом со «где мы». */
+    if (Hall.S.me.table && !(Net.S && Net.S.on && Net.S.host)) Hall.table(null);
   }
 
   // звуки комнаты живут только в лобби: сели за стол — молчим
