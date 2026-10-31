@@ -7459,6 +7459,18 @@ var Net = (function () {
       if (UI && UI.toast) UI.toast((c.name || 'Игрок') + ' ушёл из-за стола');
       return;
     }
+    /* Партия окончена — ждать нечего: доигрывать больше не во что, а
+       пауза на итогах держит насос стола, и окно счёта не показывается
+       вовсе (Ник, 31.10: «в конце партии не выкидывает в лобби»).
+       Место просто пустеет, и проверяем, не последнего ли ждали. */
+    if (S.game && S.game.over) {
+      c.away = 0; c.bot = false; c.done = true;
+      lobbyPush(); onState && onState();
+      if (UI && UI.toast) UI.toast((c.name || 'Игрок') + ' вышел из-за стола');
+      awayPush();
+      recheckDone();
+      return;
+    }
     /* Помечаем МОМЕНТ обрыва, а не срок. Срока больше нет: бот сам на
        место не садится (см. ниже). */
     c.away = Date.now();
@@ -8129,6 +8141,16 @@ var Net = (function () {
     try { if (UI && UI.closeModal) UI.closeModal(); } catch (e) { }
     try { if (window.Boot && Boot.mainMenu) Boot.mainMenu(); } catch (e) { }
   }
+  /* Место опустело, пока хозяин ждал чужих «ок». Ушедший его уже не
+     нажмёт — значит, может оказаться, что ждать больше некого. Считаем
+     заново только когда хозяин сам уже нажал (иначе стол закрылся бы у
+     него прямо со счётом на экране). */
+  function recheckDone() {
+    if (!S.host || !doneT) return;
+    if (UI && UI.netDone) UI.netDone(doneList());
+    if (allDone()) closeNow();
+  }
+
   /* Хозяин отметил, что место со счётом попрощалось. */
   function markDone(seat) {
     if (!S.host) return;
@@ -9027,8 +9049,12 @@ var UI = (function () {
 
     // что объявлено
     var comb = '<b class="dim">—</b>';
-    if (g.comboWinner >= 0) comb = '<b>' + g.names[g.comboWinner] + ' +' + g.comboPts + '</b>';
-    else if (g.cTie) comb = '<b>спор: ' + g.names[g.cTie[0]] + ' и ' + g.names[g.cTie[1]] + '</b>';
+    /* Спор смотрим ПЕРВЫМ: при равных движок всё равно держит в
+       `comboWinner` того, кто вёл на момент разбора, и табло обещало
+       ему «+20» — хотя решится это только последом. */
+    if (g.cTie) comb = '<b>спор: ' + g.names[g.cTie[0]] + ' и ' + g.names[g.cTie[1]] +
+      (narrow ? '' : ' <span class="dim">— за послед</span>') + '</b>';
+    else if (g.comboWinner >= 0) comb = '<b>' + g.names[g.comboWinner] + ' +' + g.comboPts + '</b>';
     else if (g.cLeader >= 0) {
       var kd = (g.combos && g.combos[g.cLeader] && g.combos[g.cLeader][0])
         ? g.combos[g.cLeader][0].kind : g.cLeadKind;
@@ -9939,14 +9965,44 @@ var UI = (function () {
             esc(x.t.charAt(0).toLowerCase() + x.t.slice(1));
         }).join('<i class="sep">·</i>') + '</div></div>');
     }
+    /* ---------- спор равных ----------
+       Ник, 31.10, со скриншота раздачи с тремя терцами: «рост равный,
+       засчитается терц тому, кто возьмёт послед, — но это надо
+       показать: что они заявлены и условие их забора».
+
+       Так и было: в панели оставалось «карты не открыты», и человек не
+       понимал, идёт ему терц или нет. Движок спор считает правильно
+       (`cTie` → послед), а панель про него молчала. */
+    var tied = (g.cTie && g.cTie.length === 2) ? g.cTie.slice() : [];
+    if (tied.length) {
+      var kind = g.cLeadKind ||
+        (g.combos && g.combos[tied[0]] && g.combos[tied[0]][0] && g.combos[tied[0]][0].kind) ||
+        (comboSaid.filter(function (x) { return x.p === tied[0]; })[0] || {}).kind;
+      var word = kindWord(kind || 'T');
+      rows.push('<div class="cmb tie"><div class="cmbhead">' +
+        '<span class="k">спор равных</span></div><div class="tl">' +
+        tied.map(function (q) {
+          return '<span class="who' + (q === ME ? ' you' : '') + '">' +
+            (q === ME ? 'вы' : esc(g.names[q])) + '</span>';
+        }).join(' и ') + '\u00a0— ' + esc(word) + ' одного роста. ' +
+        'При равных карты не открывают, а ' + esc(word) +
+        ' запишет тот, кто возьмёт <b>последнюю взятку</b>.</div></div>');
+    }
     // те, кто заявлял, но карты не открывал — по правилам их и не показывают
-    var said = comboSaid.filter(function (x) { return !byOwner[x.p]; });
+    var said = comboSaid.filter(function (x) {
+      return !byOwner[x.p] && tied.indexOf(x.p) < 0;     // спорящие названы выше
+    });
     if (said.length)
       rows.push('<div class="cmb said">' + said.map(function (x) {
         if (x.p === ME) return '<span class="who you">вы</span> заявляли ' + esc(saidWord(x));
         return '<span class="who">' + esc(g.names[x.p]) + '</span> заявлял' +
           (g.sex && g.sex[x.p] === 'f' ? 'а' : '') + ' ' + esc(saidWord(x));
-      }).join(', ') + ' — карты не открыты.</div>');
+      }).join(', ') + ' — карты не открыты.' +
+        /* У проигравшего рост остаётся вопрос «а мой-то терц идёт?».
+           Ответ один на всех и не зависит от того, чем кончился спор. */
+        ((tied.length || g.cLeader >= 0)
+          ? ' <span class="dim">Пишет только старшая комбинация.</span>' : '') +
+        '</div>');
     return '<div class="ltr">' + rows.join('') + '</div>';
   }
 
@@ -9969,6 +10025,26 @@ var UI = (function () {
           ? ' зашла и забрала сама' : ' зашёл и забрал сам'))
       : verb(r.last.lead, 'зашёл', 'зашла', 'зашли вы') + ', ' +
         verb(r.last.w, 'забрал', 'забрала', 'забрали вы')) + ' — плюс ' + K.POSLED + '.');
+
+    /* Спор равных комбинаций решает послед — и в таблице это выглядит
+       как число, взявшееся ниоткуда: у одного из двоих вдруг стоит
+       «+20» в колонке «Комб.». Пишем, откуда оно. */
+    if (r.tie) {
+      var tw = function (q) { return q === ME ? 'вы' : g.names[q]; };
+      /* Имена не склоняем: «послед за Тася» читается хуже, чем
+         глагол. Местоимение берём по полу — оно короткое и верное. */
+      var him = function (q) { return q === ME ? 'вам' : ((g.sex && g.sex[q] === 'f') ? 'ей' : 'ему'); };
+      var pts = (r.det && r.det[r.tie.win] && r.det[r.tie.win].combo) || 0;
+      L.push('<b>Спор равных комбинаций:</b> ' + tw(r.tie.a) + ' и ' + tw(r.tie.b) +
+        ' назвали одно и то же, рост не решил — по правилам комбинацию ' +
+        'записывает тот, кто взял послед. Последнюю взятку ' +
+        verb(r.tie.win, 'взял', 'взяла', 'взяли вы') +
+        (pts
+          ? (' — комбинации пишутся ' + him(r.tie.win) + ', плюс ' + pts + '.')
+          : (', но взяток у ' + (r.tie.win === ME ? 'вас'
+            : ((g.sex && g.sex[r.tie.win] === 'f') ? 'неё' : 'него')) +
+            ' нет — комбинации не в зачёт.')));
+    }
 
     if (!r.carry && !r.beit && !r.hang) return wrap(L);
 
@@ -10804,10 +10880,16 @@ var UI = (function () {
       line('Чья раздача', (g.dealer === ME ? 'ваша' : g.names[g.dealer]) + (dealerForced() ? ' · обяз' : '')) +
       /* Пока спор не решён, тут стоял прочерк — хотя заявки уже прозвучали.
          Показываем, кто назвал комбинацию, и только потом — кто записал. */
-      line('Комбинации', g.comboWinner >= 0 ? g.names[g.comboWinner] + ' +' + g.comboPts
-        : (g.cDecl && g.cDecl.length
-          ? 'заявили: ' + g.cDecl.map(function (q) { return q === ME ? 'вы' : g.names[q]; }).join(', ')
-          : '—'));
+      line('Комбинации', g.cTie
+        /* Спор впереди победителя: при равных `comboWinner` держит того,
+           кто вёл на момент разбора, и строка обещала ему очки раньше
+           времени. Решает это послед. */
+        ? 'спор: ' + g.cTie.map(function (q) { return q === ME ? 'вы' : g.names[q]; }).join(' и ') +
+          ' · за послед'
+        : (g.comboWinner >= 0 ? g.names[g.comboWinner] + ' +' + g.comboPts
+          : (g.cDecl && g.cDecl.length
+            ? 'заявили: ' + g.cDecl.map(function (q) { return q === ME ? 'вы' : g.names[q]; }).join(', ')
+            : '—')));
 
     var net = '';
     if (typeof Net !== 'undefined' && Net.S.on)
@@ -11123,6 +11205,18 @@ var UI = (function () {
      здесь же. */
   var awayT = null, awayTill = {}, awayWho = [];
   function netAway(list) {
+    /* ---------- партия окончена — ждать некого ----------
+
+       Ник, 31.10, со скриншота: «баг в конце партии — не выкидывает
+       игроков в лобби; игроки вышли по факту, а у игрока висит баг». На
+       снимке пустой стол и плашка «ждём игрока — нет 40 сек».
+
+       Выходило так: последняя раздача доиграна, движок уже поставил
+       `over`, а события итога ещё в очереди стола. В эту секунду у
+       гостя рвётся провод — поднимается пауза «ждём игрока», насос
+       встаёт, и окно итога не показывается НИКОГДА. А ждать нечего:
+       доигрывать больше нечего, и вернувшемуся играть уже не во что. */
+    if (g && g.over) list = [];
     awayWho = list || [];
     var box = document.getElementById('await');
     clearInterval(awayT); awayT = null;
@@ -11467,7 +11561,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '31.10 17:12';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '31.10 22:13';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
