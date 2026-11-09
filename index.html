@@ -5180,17 +5180,44 @@ var Engine = (function () {
   };
 
   /* Шаг третий: вторая взятка сыграна — старший открывает карты. */
-  Game.prototype.showLive = function () {
-    this.cShown = true;
-    if (this.cLeader < 0 || this.cTie) return;
+  /* Кто открывает карты на второй взятке.
+
+     [stated] Ник 05.11.2026: «показ двух терцов или ПОЛТИНЫ, когда они
+     одинакового роста — ОНИ ОБЯЗАНЫ ПОКАЗАТЬСЯ, но забирает очки только
+     за свою комбинацию, только когда забрал послед». Раньше при равных
+     не показывал никто: показ стоял под тем же условием, что и зачёт.
+     Это разные вещи — показ доказывает заявку, а зачёт решается
+     последом. Теперь при равных карты кладут ОБА спорщика (со своими
+     напарниками), а очки по-прежнему ждут последа. */
+  Game.prototype.whoShows = function () {
+    var out = [], self = this;
+    function add(p) {
+      self.comboSideList(p).forEach(function (q) { if (out.indexOf(q) < 0) out.push(q); });
+    }
+    if (this.cTie) { add(this.cTie[0]); add(this.cTie[1]); }
+    else if (this.cLeader >= 0) add(this.cLeader);
+    return out;
+  };
+  Game.prototype.comboList = function (seats) {
     var lst = [];
-    this.comboSideList(this.cLeader).forEach(function (q) {
+    (seats || []).forEach(function (q) {
       this.combos[q].forEach(function (co) {
         var cp = {}; for (var kk in co) cp[kk] = co[kk];
-        cp.owner = q; lst.push(cp);
-      });
+        cp.owner = q; cp.pts = (co.kind === 'P' ? this.o.polt : this.o.terz);
+        lst.push(cp);
+      }, this);
     }, this);
-    this.push({ e: 'comboWin', p: this.cLeader, pts: this.comboPts, list: lst, live: true });
+    return lst;
+  };
+
+  Game.prototype.showLive = function () {
+    this.cShown = true;
+    if (this.cLeader < 0) return;
+    var who = this.whoShows();
+    if (!who.length) return;
+    this.push({ e: 'comboWin', p: this.cLeader, pts: this.comboPts,
+      list: this.comboList(who), live: true,
+      tie: this.cTie ? this.cTie.slice() : null });
   };
 
   Game.prototype.resolveCombos = function () {
@@ -5202,15 +5229,13 @@ var Engine = (function () {
       this.say('Комбинации за ' + who + ' — ' + this.comboPts + ' очков.', 'hi');
     }
     else this.say('Комбинаций никто не заявил.');
-    if (this.cLeader >= 0 && !this.cTie) {
-      var lst = [];
-      this.comboSideList(this.cLeader).forEach(function (q) {
-        this.combos[q].forEach(function (co) {
-          var cp = {}; for (var kk in co) cp[kk] = co[kk];
-          cp.owner = q; lst.push(cp);
-        });
-      }, this);
-      this.push({ e: 'comboWin', p: this.cLeader, pts: this.comboPts, list: lst });
+    /* Показ — и при равных тоже: он доказывает заявку, а не решает
+       зачёт (см. `showLive`). */
+    if (this.cLeader >= 0) {
+      var who2 = this.whoShows();
+      if (who2.length)
+        this.push({ e: 'comboWin', p: this.cLeader, pts: this.comboPts,
+          list: this.comboList(who2), tie: this.cTie ? this.cTie.slice() : null });
     }
     this.startPlay();
   };
@@ -6690,6 +6715,52 @@ var Bots = (function () {
 
   /* ================= розыгрыш ================= */
 
+  /* ---------- манэллу даром не отдают ----------
+
+     Ник 05.11.2026, со скриншота: катала зашёл козырной девяткой, а
+     козырный валет сидел за столом у соперника — четырнадцать очков
+     ушли в чужую взятку просто так.
+
+     Замер (400 раздач вчетвером) показал, где собака зарыта: ДВОРОВЫЙ
+     так не ходит никогда (0 случаев из 34), а КАТАЛА ходит (1 из 93) —
+     то есть эвристика это понимает, а Монте-Карло её иногда
+     переигрывает: раскладов всего десять, валет в одной из трёх
+     невидимых рук, и на такой выборке «зайти девяткой» выходит в
+     среднем не хуже. Увеличивать выборку — платить временем на
+     размышление; спорить с перебором «на запас» — менять силу бота, а
+     она держит шкалу рейтинга.
+
+     Поэтому правило узкое и именованное, как «король под туз»: ЗАХОДИТЬ
+     манэллой, пока мусор не вышел и его нет у меня на руках, нельзя —
+     если есть чем ходить ещё. Своей взятки она так не берёт (валет
+     старше), а стоит четырнадцать. Отвечать ею никто не мешает: там она
+     часто обязана лечь по правилам.
+
+     Для замеров правило выключается: `Bots.keepManella(false)`. */
+  var KEEP_MANELLA = true;
+  function keepManella(v) { KEEP_MANELLA = (v !== false); }
+
+  Brain.prototype.manellaGuard = function (card, legal) {
+    var g = this.g, t = g.trump;
+    if (!KEEP_MANELLA || !t || !card) return card;
+    if (g.cur.length) return card;                       // это ответ, а не заход
+    if (!(card.s === t && card.r === '9')) return card;
+    if (legal.length < 2) return card;
+    var hand = g.hands[this.me] || [];
+    for (var i = 0; i < hand.length; i++)                // мусор у меня — девятка берёт
+      if (hand[i].s === t && hand[i].r === 'J') return card;
+    if (this.seen && this.seen[K.id({ r: 'J', s: t })]) return card;   // мусор уже вышел
+    /* Самый дешёвый другой заход: отдаём пробу, а не четырнадцать. */
+    var alt = null, av = Infinity;
+    for (i = 0; i < legal.length; i++) {
+      var c = legal[i];
+      if (c.s === t && c.r === '9') continue;
+      var v = K.val(c, t);
+      if (v < av) { av = v; alt = c; }
+    }
+    return alt || card;
+  };
+
   Brain.prototype.play = function (pend) {
     var g = this.g, legal = pend.legal, me = this.me, card;
     if (this.lvl === 1) card = this.playSimple(legal);
@@ -6697,6 +6768,7 @@ var Bots = (function () {
       card = (this.lvl >= 3 && !this.opt.noSolve) ? this.solve(legal) : null;
       if (!card && this.lvl >= 3 && !this.opt.noMC) card = this.mc(legal);
       if (!card) card = (g.cur.length === 0) ? this.lead(legal) : this.follow(legal);
+      card = this.manellaGuard(card, legal);
     }
     var bella = false;
     if (g.bellaOffer(me, card)) bella = this.wantBella(card);
@@ -7039,7 +7111,7 @@ var Bots = (function () {
     return best || list[0];
   };
 
-  return { Brain: Brain, setBellaP: setBellaP, suitStrength: suitStrength, handValue: handValue,
+  return { Brain: Brain, setBellaP: setBellaP, keepManella: keepManella, suitStrength: suitStrength, handValue: handValue,
     bidFeats: bidFeats, bidRow: bidRow, bidP: bidP, BIDP: BIDP, BIDQ: BIDQ };
 })();
 if (typeof module !== 'undefined') module.exports = Bots;
@@ -8338,6 +8410,30 @@ var Net = (function () {
    Ушёл главный — оставшиеся через случайную паузу переизбирают нового.
 
    Истории нет и не задумано: зашёл — видишь то, что говорят сейчас.
+
+   06.11.2026 — ДВА ТРАНСПОРТА. Схема выше (главный-браузер) держалась на
+   двух случайностях: что общий брокер отвечает и что главному не вздумается
+   закрыть вкладку. Ник: «других играющих не всегда видно» — это она и есть:
+   кому не досталось соединения с главным, тот не видел никого, а пока идёт
+   переизбрание, список пуст у всех.
+
+   Теперь главного нет вовсе. Каждый пишет СВОЮ строку в Firestore
+   (`hall/klabor/members/<вкладка>`) и слушает коллекцию целиком; разговор —
+   такие же записи в `hall/klabor/msgs`. Системные строки («вошёл», «сел за
+   стол», «закрыл стол») никто не рассылает: каждый выводит их сам, сравнив
+   новый снимок со старым. Писать некому — значит, и ломаться нечему.
+
+   Старый транспорт оставлен целиком и включается сам, если облако не
+   отвечает или правила ещё не выложены: хуже, чем было, не станет.
+   Ручной выключатель — `localStorage.klabor-hall` = `cloud` | `peer` |
+   пусто (само).
+
+   Чего это стоит. Платим чтениями Firestore: своя строка переписывается
+   раз в минуту, и каждая такая запись — одно чтение у каждого, кто сейчас
+   слушает. Поэтому слушаем ТОЛЬКО пока человек в меню: сел за стол — свою
+   строку обновляем, а чужие не читаем (за столом комнаты всё равно не
+   видно). На бесплатном тарифе (50 тыс. чтений в сутки) этого хватает с
+   запасом, пока в меню одновременно сидят единицы, а не десятки.
    ============================================================ */
 var Hall = (function () {
   'use strict';
@@ -8348,6 +8444,8 @@ var Hall = (function () {
 
   var H = {
     on: false, host: false, ready: false,
+    via: '',                        // 'cloud' | 'peer' — каким транспортом живём
+    cloudErr: '',                   // облако огрызнулось, когда комната уже стояла
     peer: null, hostConn: null, conns: [],
     me: { id: '', name: '', face: -1, table: null, where: 'room' },
     members: [], msgs: [], hostName: '',
@@ -8358,6 +8456,7 @@ var Hall = (function () {
   // не должны рушить уже поднятую комнату
   var gen = 0;
   function now() { return Date.now(); }
+  function ls(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
   function hallId() { return Net.PREFIX + HALL; }
   function fire() { if (H.onChange) try { H.onChange(); } catch (e) { } }
 
@@ -8398,6 +8497,41 @@ var Hall = (function () {
     H.me.table = null;
     H.me.where = 'room';
     H.members = []; H.msgs = []; seenIds = null;
+    H.via = ''; H.cloudErr = '';
+
+    /* Сперва облако, брокер — как было, если облако не вышло. Сколько ждать
+       облако: Firebase качается со gstatic и у кого-то не качается вовсе,
+       поэтому ждём семь секунд и уходим к брокеру, а опоздавший ответ
+       облака уже никому не нужен (счётчик `cg`). */
+    var how = ls('klabor-hall') || 'auto';
+    if (how !== 'peer' && window.Cloud && Cloud.hall) {
+      var my = ++cg, late = false;
+      setTimeout(function () {
+        if (my !== cg || !H.on || H.via) return;
+        late = true; peerFail(how);
+      }, 7000);
+      Cloud.hall().then(function (h) {
+        if (my !== cg || !H.on || late) return;
+        return fsStart(h);
+      }).catch(function () {
+        if (my !== cg || !H.on || late) return;
+        peerFail(how);
+      });
+      return;
+    }
+    peerEnter();
+  }
+
+  /* Облако не вышло. Выключатель стоит на `cloud` — значит человек просил
+     именно облако, и подменять его брокером молча нельзя: пусть видит
+     «комната недоступна». Во всех прочих случаях идём по-старому. */
+  var cg = 0;
+  function peerFail(how) {
+    if (how === 'cloud') { H.err = 'комната недоступна'; H.on = false; fire(); return; }
+    peerEnter();
+  }
+  function peerEnter() {
+    H.via = 'peer';
     Net.loadPeer().then(function (ok) {
       if (!ok) { H.err = 'нет связи с брокером'; H.on = false; fire(); return; }
       claim();
@@ -8478,6 +8612,7 @@ var Hall = (function () {
   }
 
   function leave() {
+    if (H.via === 'cloud') return fsLeave();
     H.on = false; H.ready = false; H.host = false; gen++;
     if (H.hostConn) { try { Net.send(H.hostConn, { t: 'bye' }); } catch (e) { } }
     try { if (H.peer) H.peer.destroy(); } catch (e) { }
@@ -8650,6 +8785,7 @@ var Hall = (function () {
   function say(text) {
     text = String(text || '').trim().slice(0, 200);
     if (!text || !H.ready) return;
+    if (H.via === 'cloud') return fsSay('msg', text);
     if (H.host) broadcastMsg(H.me.name, text, H.me.id);
     else Net.send(H.hostConn, { t: 'msg', text: text });
   }
@@ -8664,6 +8800,10 @@ var Hall = (function () {
     if (!H.ready) return;
     var was = H.me.table && H.me.table.code;
     H.me.table = code ? { code: code, N: N, go: !!go } : null;
+    /* В облаке объявление — это не рассылка, а своя же строка: её увидят
+       все, кто слушает коллекцию, и строку в разговор каждый напишет себе
+       сам, сравнив снимки (fsDiff). */
+    if (H.via === 'cloud') { fsMe(); return; }
     if (H.host) {
       var m = H.members.filter(function (x) { return x.id === 'host'; })[0];
       if (m) m.table = H.me.table;
@@ -8691,6 +8831,13 @@ var Hall = (function () {
     if (H.me.where === w) return;
     H.me.where = w;
     if (!H.on || !H.ready) return;
+    if (H.via === 'cloud') {
+      fsMe();
+      /* Сел за стол — чужие строки больше не читаем (за столом комнаты не
+         видно, а каждое чужое обновление — чтение). Вернулся — слушаем снова. */
+      if (w === 'room') fsWatchMem(); else fsStopMem();
+      return;
+    }
     if (H.host) {
       var m = null, i;
       for (i = 0; i < H.members.length; i++) if (H.members[i].id === 'host') m = H.members[i];
@@ -8706,6 +8853,7 @@ var Hall = (function () {
     if (typeof face === 'number' && face >= 0) H.me.face = face;
     if (card) H.me.card = card;
     if (!H.ready) return;
+    if (H.via === 'cloud') { fsMe(); return; }
     if (H.host) {
       H.hostName = H.me.name;
       var m = H.members.filter(function (x) { return x.id === 'host'; })[0];
@@ -8720,6 +8868,7 @@ var Hall = (function () {
   function announce(text) {
     text = String(text || '').trim().slice(0, 120);
     if (!text || !H.ready) return;
+    if (H.via === 'cloud') return fsSay('sys', text);
     if (H.host) { line('sys', text); toAll({ t: 'sys', text: text }); }
     else Net.send(H.hostConn, { t: 'note', text: text });
   }
@@ -8735,6 +8884,7 @@ var Hall = (function () {
 
   setInterval(function () {
     if (!H.on || !H.ready) return;
+    if (H.via === 'cloud') return;        // у облачной комнаты свой пульс, пореже
     if (H.host) {
       var t = now(), i, c;
       for (i = H.conns.length - 1; i >= 0; i--) {
@@ -8747,6 +8897,244 @@ var Hall = (function () {
     Net.send(H.hostConn, { t: 'ping' });
     if (H.lastHost && now() - H.lastHost > DEAD) lostHost();
   }, PING);
+
+
+  /* ============================================================
+     ОБЛАЧНАЯ КОМНАТА
+
+     Где лежит:
+       hall/klabor/members/<вкладка> — одна строка на одну открытую игру:
+         {uid, tab, name, face, card, where, table, since, t, exp}
+       hall/klabor/msgs/<авто>       — разговор: {uid, tab, name, kind, text, t, exp}
+
+     `uid` в каждой записи — чтобы правила пускали править только свою
+     (номер даёт облако: вошёл человек в профиль или нет, см. Cloud.hall).
+     `tab` — своя строка на каждую вкладку: номер у вкладок один, а сидят
+     они по отдельности. `t` — когда последний раз о себе напомнили;
+     молчит дольше GHOST — человека тут нет, и строку в списке не держим.
+     `exp` — на случай, если в консоли включат срок хранения: тогда
+     старьё вычистит сам Firestore, бесплатно.
+     ============================================================ */
+
+  var GAME = 'klabor';
+  var HB = 60000;            // как часто переписываем свою строку
+  var GHOST = 200000;        // три пропущенных круга — значит человека нет
+  var SWEEP = 1800000;       // полчаса — такую строку может убрать любой
+  var KEEP = 3600000;        // столько живёт запись, если включён срок хранения
+  var FS = null;
+  var tabId = '';
+
+  /* Своя строка должна пережить F5 (иначе на полминуты в комнате стоят два
+     одинаковых человека) и НЕ делиться между вкладками — потому
+     sessionStorage, а не localStorage. */
+  function fsTab() {
+    if (tabId) return tabId;
+    try { tabId = sessionStorage.getItem('klabor-hall-tab') || ''; } catch (e) { }
+    if (!tabId) {
+      tabId = now().toString(36) + Math.random().toString(36).slice(2, 8);
+      try { sessionStorage.setItem('klabor-hall-tab', tabId); } catch (e) { }
+    }
+    return tabId;
+  }
+
+  /* Firestore не принимает `undefined` ни в одном поле — а визитку собирает
+     игра, и одно пропущенное число уронило бы запись целиком (и комнату
+     вместе с ней, молча, через откат на брокер). Поэтому визитку чистим. */
+  function clean(v) {
+    if (v === undefined) return null;
+    if (v === null || typeof v !== 'object') return v;
+    if (Object.prototype.toString.call(v) === '[object Array]') return v.map(clean);
+    var o = {};
+    for (var k in v) if (Object.prototype.hasOwnProperty.call(v, k) && v[k] !== undefined) o[k] = clean(v[k]);
+    return o;
+  }
+
+  function fsMem() { return FS.db.collection('hall').doc(GAME).collection('members'); }
+  function fsMsgs() { return FS.db.collection('hall').doc(GAME).collection('msgs'); }
+
+  function fsStart(h) {
+    FS = { db: h.db, uid: h.uid, tab: fsTab(), since: now(), anon: !!h.anon,
+      mem: null, msg: null, beat: null, raw: null, prev: {}, first: true,
+      seen: {}, order: [], firstMsg: true, swept: false };
+    H.via = 'cloud'; H.host = false; H.hostName = ''; H.me.id = FS.tab;
+    FS.beat = setInterval(fsBeat, HB);
+    return fsMe().then(function () {
+      if (!FS) return;
+      fsWatchMsgs();
+      if (H.me.where === 'room') fsWatchMem();
+      else { H.ready = true; fire(); }     // вошли прямо за столом — слушать нечего
+    });
+  }
+
+  /* Облако огрызнулось. Пока комната не поднялась — это приговор транспорту
+     (чаще всего правила не выложены), и мы молча уходим к брокеру: для
+     игрока комната просто работает, как раньше. Если же комната уже стоит,
+     Firestore сам переживёт обрыв и догонит, рушить тут нечего. */
+  function fsErr(e) {
+    if (!FS) return;
+    if (H.ready) { H.cloudErr = (e && (e.code || e.message)) || 'облако'; return; }
+    var how = ls('klabor-hall') || 'auto';
+    fsDrop();
+    H.via = ''; H.members = []; H.ready = false; seenIds = null;
+    peerFail(how);
+  }
+
+  function fsDrop() {
+    var f = FS; FS = null;
+    if (!f) return;
+    try { if (f.mem) f.mem(); } catch (e) { }
+    try { if (f.msg) f.msg(); } catch (e) { }
+    if (f.beat) clearInterval(f.beat);
+    return f;
+  }
+
+  // своя строка целиком: переписываем набело — так она починится сама,
+  // даже если её кто-то вычистил как протухшую
+  function fsMe() {
+    if (!FS) return Promise.resolve();
+    var t = now(), tb = H.me.table;
+    return fsMem().doc(FS.tab).set({
+      uid: FS.uid, tab: FS.tab,
+      name: H.me.name || 'Игрок', face: (H.me.face == null ? -1 : H.me.face),
+      card: H.me.card ? clean(H.me.card) : null, where: H.me.where || 'room',
+      table: tb ? { code: tb.code, N: tb.N || 0, go: !!tb.go } : null,
+      since: FS.since, t: t, exp: new Date(t + KEEP)
+    }).catch(fsErr);
+  }
+
+  function fsBeat() {
+    if (!FS || !H.on) return;
+    fsMe();
+    if (FS.mem) { fsList(); fire(); }     // протухшие уходят из списка без нового снимка
+  }
+
+  function fsWatchMem() {
+    if (!FS || FS.mem) return;
+    FS.first = true;                      // первый снимок — это не «все вошли»
+    FS.mem = fsMem().onSnapshot(function (snap) {
+      if (!FS) return;
+      var raw = [];
+      snap.forEach(function (d) { var v = d.data() || {}; v.id = d.id; raw.push(v); });
+      FS.raw = raw;
+      if (!FS.swept) { FS.swept = true; fsSweep(raw); }
+      fsList();
+      H.ready = true; H.err = '';
+      fire();
+    }, fsErr);
+  }
+  function fsStopMem() {
+    if (FS && FS.mem) { try { FS.mem(); } catch (e) { } FS.mem = null; }
+  }
+
+  /* Строки тех, кто не закрыл игру по-человечески (упал браузер, пропал
+     интернет), остаются лежать. В списке их не видно — но копиться им незачем:
+     правила разрешают убрать чужую строку, если ей больше получаса. Чистим
+     понемногу и только один раз за вход — это уборка, а не обязанность. */
+  function fsSweep(raw) {
+    var t = now() - SWEEP, k = 0;
+    for (var i = 0; i < raw.length && k < 5; i++) {
+      if (raw[i].t && raw[i].t < t) { k++; try { fsMem().doc(raw[i].id).delete(); } catch (e) { } }
+    }
+  }
+
+  function fsList() {
+    if (!FS || !FS.raw) return;
+    var t = now();
+    var live = FS.raw.filter(function (v) { return v.t && t - v.t < GHOST; });
+    // порядок по времени входа: кто раньше пришёл, тот выше (как было у брокера)
+    live.sort(function (a, b) {
+      return (a.since || 0) - (b.since || 0) || (a.id < b.id ? -1 : 1);
+    });
+    H.members = live.map(function (v) {
+      return { id: v.id, name: v.name || 'Игрок',
+        face: (typeof v.face === 'number' ? v.face : -1), card: v.card || null,
+        table: v.table || null, where: v.where || 'room', host: false };
+    });
+    fsDiff();
+    noteMembers();
+  }
+
+  /* Главного нет, рассылать системные строки некому — каждый пишет их себе
+     сам, сравнив новый список со старым. Выходит даже честнее: строка
+     появляется ровно у того, кто это изменение увидел. */
+  function fsDiff() {
+    var cur = {}, id, m, p, i;
+    for (i = 0; i < H.members.length; i++) {
+      m = H.members[i];
+      cur[m.id] = { name: m.name, where: m.where,
+        code: m.table ? m.table.code : '', N: m.table ? m.table.N : 0 };
+    }
+    if (FS.first) { FS.first = false; FS.prev = cur; return; }
+    for (id in cur) {
+      m = cur[id]; p = FS.prev[id];
+      if (!p) {
+        line('sys', m.name + ' вошёл в комнату.');
+        if (m.code) tableLine(m.name, m.code, m.N, id);
+        continue;
+      }
+      if (p.where !== m.where) whereLine(m.name, m.where, id);
+      if (m.code && m.code !== p.code) tableLine(m.name, m.code, m.N, id);
+      else if (!m.code && p.code) line('sys', m.name + ' закрыл стол.');
+    }
+    for (id in FS.prev) if (!cur[id]) line('sys', FS.prev[id].name + ' вышел из комнаты.');
+    FS.prev = cur;
+  }
+
+  /* Разговор. Истории не держим (так и задумано), поэтому ПЕРВЫЙ снимок —
+     это прошлое: помечаем прочитанным и не показываем. Дальше показываем
+     только то, что приходит новым. Так обходимся без сверки часов: чьи-то
+     часы могут врать на минуты, а «пришло после меня» врать не может. */
+  function fsWatchMsgs() {
+    if (!FS || FS.msg) return;
+    FS.firstMsg = true;
+    FS.msg = fsMsgs().orderBy('t', 'desc').limit(30).onSnapshot(function (snap) {
+      if (!FS) return;
+      var add = [];
+      snap.forEach(function (d) {
+        if (FS.seen[d.id]) return;
+        FS.seen[d.id] = 1; FS.order.push(d.id);
+        if (!FS.firstMsg) add.push(d.data() || {});
+      });
+      FS.firstMsg = false;
+      if (FS.order.length > 200) {        // помним только то, что ещё может вернуться
+        FS.order.splice(0, 100).forEach(function (k) { delete FS.seen[k]; });
+      }
+      add.sort(function (a, b) { return (a.t || 0) - (b.t || 0); });
+      add.forEach(fsShow);
+    }, fsErr);
+  }
+
+  function fsShow(d) {
+    var txt = String(d.text || '').slice(0, 200);
+    if (!txt) return;
+    if (d.kind === 'sys') return line('sys', txt);
+    line('msg', txt, d.name || 'Игрок');
+    if (d.tab !== FS.tab) snd('msg');
+  }
+
+  function fsSay(kind, text) {
+    if (!FS) return;
+    var t = now();
+    fsMsgs().add({
+      uid: FS.uid, tab: FS.tab, name: H.me.name || 'Игрок',
+      kind: kind, text: text, t: t, exp: new Date(t + KEEP)
+    }).catch(fsErr);
+  }
+
+  function fsLeave() {
+    var f = fsDrop();
+    H.on = false; H.ready = false; H.host = false; H.via = '';
+    H.members = []; H.msgs = []; H.hostName = ''; seenIds = null;
+    if (f) { try { f.db.collection('hall').doc(GAME).collection('members').doc(f.tab).delete(); } catch (e) { } }
+    fire();
+  }
+
+  /* Закрыл вкладку — убираем свою строку сразу, не дожидаясь, пока она
+     протухнет. Запрос может и не успеть уйти — тогда сработает GHOST. */
+  window.addEventListener('pagehide', function () {
+    if (!FS) return;
+    try { fsMem().doc(FS.tab).delete(); } catch (e) { }
+  });
 
   return {
     S: H, enter: enter, leave: leave, say: say, table: table,
@@ -9912,7 +10300,9 @@ var UI = (function () {
 
   function showCombo(e) {
     comboShown = e.list || [];
-    toast(g.W(e.p, 'записывает', 'записываете') + ' ' + e.pts + ' за комбинации');
+    /* При равных ещё никто ничего не записывает — решит послед. */
+    if (e.tie) toast('Равные комбинации — карты на стол, очки решит послед');
+    else toast(g.W(e.p, 'записывает', 'записываете') + ' ' + e.pts + ' за комбинации');
     drawScore();
   }
 
@@ -9925,20 +10315,29 @@ var UI = (function () {
       if (!byOwner[co.owner]) { byOwner[co.owner] = []; order.push(co.owner); }
       byOwner[co.owner].push(co);
     });
+    var tie = e.tie && e.tie.length === 2 ? e.tie : null;
     var body = order.map(function (q) {
-      var cards = '';
+      var cards = '', own = 0;
       byOwner[q].forEach(function (co) {
+        own += (co.pts || 0);
         co.cards.forEach(function (cc) { cards += '<div class="card">' + ART.faceHTML(cc) + '</div>'; });
       });
-      return '<div class="sub" style="margin:10px 0 4px"><b>' + g.names[q] + '</b> — ' +
-        byOwner[q].map(K.comboLabel).join(', ') + '</div>' +
+      return '<div class="sub" style="margin:10px 0 4px"><b>' + (q === ME ? 'вы' : g.names[q]) + '</b> — ' +
+        byOwner[q].map(K.comboLabel).join(', ') +
+        /* При равных у каждого своя сумма: забирает только за СВОЮ
+           комбинацию, а не за обе. */
+        (tie && own ? ' · <b>' + own + '</b>' : '') + '</div>' +
         '<div class="combolist big">' + cards + '</div>';
     }).join('');
     var mine = (g.sideOf ? g.sideOf(e.p) === g.sideOf(ME) : e.p === ME);
-    modal('<h3>Показ комбинаций</h3>' +
-      '<div class="sub">' + (mine ? 'Ваша сторона' : g.names[e.p] + '') + ' записывает <b>' + e.pts +
-      '</b> — карты на стол, чтобы все убедились. Младшие комбинации не показывают: ' +
-      'это подсказка напарнику.</div>' + body +
+    var head = tie
+      ? '<div class="sub">Рост равный — поэтому карты кладут <b>оба</b>, чтобы все убедились. ' +
+        'Очки запишет тот, кто возьмёт <b>последнюю взятку</b>, и только за <b>свою</b> ' +
+        'комбинацию — не за обе.</div>'
+      : '<div class="sub">' + (mine ? 'Ваша сторона' : g.names[e.p]) + ' записывает <b>' + e.pts +
+        '</b> — карты на стол, чтобы все убедились. Младшие комбинации не показывают: ' +
+        'это подсказка напарнику.</div>';
+    modal('<h3>Показ комбинаций</h3>' + head +
       '<div class="row"><button class="btn pri wide" data-x="1">Понятно</button></div>',
       function (m) {
         m.onclick = function (ev) {
@@ -10013,8 +10412,8 @@ var UI = (function () {
           return '<span class="who' + (q === ME ? ' you' : '') + '">' +
             (q === ME ? 'вы' : esc(g.names[q])) + '</span>';
         }).join(' и ') + '\u00a0— ' + esc(word) + ' одного роста. ' +
-        'При равных карты не открывают, а ' + esc(word) +
-        ' запишет тот, кто возьмёт <b>последнюю взятку</b>.</div></div>');
+        'Карты при равных кладут <b>оба</b>, а запишет тот, кто возьмёт ' +
+        '<b>последнюю взятку</b>, — и только свою комбинацию.</div></div>');
     }
     // те, кто заявлял, но карты не открывал — по правилам их и не показывают
     var said = comboSaid.filter(function (x) {
@@ -11422,6 +11821,12 @@ var Cloud = (function () {
         return auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function () { });
       }).then(function () {
         auth.onAuthStateChanged(function (u) {
+          /* Анонимный вход — не вход. Он нужен только комнате (зал на
+             Firestore, см. p9_hall): правила пускают туда любого, кто
+             назвался, но профиль анонимного пользователя — чужой пустой
+             профиль, и сливать с ним наигранное нельзя. Поэтому для всего
+             облачного хозяйства такой пользователь — то же, что никто. */
+          if (u && u.isAnonymous) u = null;
           C.user = u ? { uid: u.uid, name: u.displayName || '', email: u.email || '' } : null;
           C.state = u ? 'in' : 'off';
           if (u) {
@@ -11596,6 +12001,26 @@ var Cloud = (function () {
   C.reset = function (e) { return run(function () { return auth.sendPasswordResetEmail(e); }); };
   C.signOut = signOut;
   C.push = push;
+  /* ---------- вход для комнаты ----------
+
+     Комнате (p9_hall) нужен Firestore, а не профиль: ей достаточно, чтобы
+     правила увидели ЛЮБОГО назвавшегося. Вошёл человек через Google —
+     берём его же вход; не вошёл — просим анонимный. Второе не делает его
+     «вошедшим» нигде, кроме правил Firestore (см. выше).
+
+     Отдаём и базу, и номер: номер едет в каждую строку комнаты, по нему
+     правила проверяют, что человек правит только свою. */
+  C.hall = function () {
+    return load().then(function () {
+      if (auth.currentUser) return auth.currentUser;
+      return auth.signInAnonymously().then(function (r) {
+        return (r && r.user) || auth.currentUser;
+      });
+    }).then(function (u) {
+      if (!u || !db) throw new Error('облако не пустило');
+      return { db: db, uid: u.uid, anon: !!u.isAnonymous };
+    });
+  };
   /* Наружу — только для проверок (`t_oblako.js`): по отпечатку видно,
      заметит ли облако изменение рейтинга. Облако живьём в прогоне не
      поднять — Firebase туда не ходит. */
@@ -11619,7 +12044,7 @@ var Boot = (function () {
     cfgV: 0                      // номер настроек: поднимается, когда меняем значение по умолчанию
   };
   var game = null, brains = [];
-  var BUILD = '02.11 11:49';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '06.11 14:12';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
